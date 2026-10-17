@@ -1,0 +1,9 @@
+{
+  "BOT_PHOTO": "./src/midias/imagens/menu.png",
+  "PREFIX": "/",
+  "OWNER_NAME": "·.¸¸.·KATRIELLY ·.¸¸.·",
+  "BOT_NAME": "🎀 🅺🅰🆃🆁🅸🅴🅻🅻🆈 - 🅱🅾🆃 🎀",
+  "BOT_FUNDO": "./src/midias/imagens/fundo.png",
+  "BOT_FUNDO_ANIMADO": false,
+  "BOT_PHOTO_GIF": false
+}
