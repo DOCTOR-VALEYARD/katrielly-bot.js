@@ -43,7 +43,7 @@ async function menumidias(sock, msg) {
                 ["video", "link"], ["tiktok", "link"], ["instagram", "link"], ["kwai", "link"]
             ] },
             { emoji: "🖼️", titulo: "FIGURINHA E CONVERSÃO", itens: [
-                "s", "sticker", "f", "gif", "toimg", ["katrielly-auto", "(automática, admin ativa)"]
+                "s", "sticker", "togif", "toimg", ["katrielly-auto", "(automática, admin ativa)"]
             ] },
             { emoji: "📂", titulo: "ARQUIVOS E COLEÇÃO", itens: [
                 ["pinterest", "link do Pinterest"], ["mediafire", "link"]

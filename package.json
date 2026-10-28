@@ -2,10 +2,12 @@
   "name": "katrielly-bot",
   "version": "8.0.0",
   "description": "🎀 Katrielly Bot - Bot WhatsApp Multifuncional",
-  "main": "katriellybot.js",
+  "main": "katrielly.js",
   "scripts": {
-    "start": "node katriellybot.js",
-    "instalar": "bash instalar.sh"
+    "start": "npm install --allow-git=all && node katrielly.js",
+    "iniciar": "node katrielly.js",
+    "instalar": "bash instalar.sh",
+    "postinstall": "node scripts/baixar-ytdlp.js"
   },
   "author": "·.¸¸.·KATRIELLY ·.¸¸.·",
   "license": "MIT",

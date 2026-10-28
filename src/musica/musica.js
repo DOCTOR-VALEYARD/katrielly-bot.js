@@ -1,5 +1,5 @@
 /* =================================================
-   🎵 KATRIELLY BOT — MUSICA V7 🎀
+   🎵 KATRIELLY BOT — MUSICA V6.7
    📁 musica.js
    🎀 Criadora: ·.¸¸.·KATRIELLY ·.¸¸.·
 
@@ -25,14 +25,46 @@ const https = require('https');
 const os = require('os');
 const axios = require('axios');
 
+// =================================================
+// 🗂️ PASTA TEMPORÁRIA PRÓPRIA (corrige ENOSPC no /tmp)
+// =================================================
+// O Baileys cria arquivos temporários em os.tmpdir() (/tmp) ao enviar mídia.
+// Em hospedagem o /tmp costuma ser minúsculo e enche ("ENOSPC: no space left
+// on device") mesmo com o disco do painel livre. Aqui o bot passa a usar uma
+// pasta dentro do próprio disco e apaga sobras antigas ao ligar.
+try {
+    const tmpBot = path.join(process.cwd(), 'tmp');
+    fs.mkdirSync(tmpBot, { recursive: true });
+    process.env.TMPDIR = tmpBot;
+    process.env.TEMP = tmpBot;
+    process.env.TMP = tmpBot;
+    const limite = Date.now() - 30 * 60 * 1000;
+    for (const nome of fs.readdirSync(tmpBot)) {
+        const caminho = path.join(tmpBot, nome);
+        try {
+            if (fs.statSync(caminho).mtimeMs < limite) fs.rmSync(caminho, { recursive: true, force: true });
+        } catch {}
+    }
+} catch (erroTmp) {
+    console.log('⚠️ Não consegui criar a pasta tmp do bot: ' + erroTmp.message);
+}
+
 const config = require('../../config');
 const { enviarNativeFlow, botao, botaoUrl } = require('../menuBotoes/menuBotoes');
 
 const { buscarFotoContexto } =
     require('../foto-contexto/foto-contexto');
 
-const { baixarAudioApi } =
-    require('../ytapi/ytapi');
+// 🔗 Extrai o ID de um vídeo do YouTube (de um link ou do próprio ID).
+// Antes isso vinha da API (ytapi); agora é local, porque a API foi removida.
+function extrairIdYoutube(entrada) {
+    const texto = String(entrada || '');
+    const m = texto.match(
+        /(?:youtu\.be\/|youtube\.com\/(?:watch\?(?:.*&)?v=|embed\/|shorts\/|v\/|live\/))([A-Za-z0-9_-]{11})/i
+    );
+    if (m) return m[1];
+    return /^[A-Za-z0-9_-]{11}$/.test(texto) ? texto : null;
+}
 
 // youtubei.js é usado somente para pesquisar. O yt-dlp continua sendo o
 // fallback automático e também continua responsável pelo download.
@@ -68,31 +100,22 @@ async function baixarTikTokDireto(url, destino) {
 }
 
 // =================================================
-// ⬇️ yt-dlp — DETECTA O QUE JÁ EXISTE, E SÓ BAIXA SE PRECISAR E PUDER
+// ⬇️ yt-dlp AUTOMÁTICO (hospedagem sem root / sem apt)
 // =================================================
-// Ordem de busca:
-//   1) binário próprio em config.MUSICA.BINARIO (se você definiu)
-//   2) yt-dlp já instalado no aparelho/servidor (PATH) — ex.: Termux com
-//      "pkg install yt-dlp" ou "pip install yt-dlp"
-//   3) python -m yt_dlp (se o módulo estiver instalado)
-//   4) binário baixado antes na pasta do bot
-//   5) baixa o binário oficial do GitHub — SOMENTE em Linux x64/arm64/armv7
-//      (hospedagens). No Termux/Android o binário não roda, então NÃO baixa
-//      e NÃO dá erro: o áudio do /play segue funcionando pelas APIs.
-//
-// O yt-dlp só é necessário para vídeo/TikTok/Instagram e como busca reserva.
-
-const { execFile } = require('child_process');
+// Baixa o binário standalone do yt-dlp (não precisa de Python) pra dentro
+// da pasta do bot e reaproveita nas próximas vezes. Atualiza sozinho a cada
+// 7 dias, porque o YouTube muda toda hora e versão velha quebra.
 
 function pastaEscrevivel() {
-    for (const dir of [process.cwd(), path.join(__dirname, '..', '..'), os.tmpdir()]) {
+    const candidatas = [process.cwd(), path.join(__dirname, '..', '..'), os.tmpdir()];
+    for (const dir of candidatas) {
         try { fs.accessSync(dir, fs.constants.W_OK); return dir; } catch {}
     }
     return os.tmpdir();
 }
 
 const YTDLP_PATH = path.join(pastaEscrevivel(), 'yt-dlp');
-const YTDLP_URL_BASE = 'https://github.com/yt-dlp/yt-dlp/releases/latest/download/';
+const YTDLP_URL = 'https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux';
 const YTDLP_MAX_IDADE_MS = 7 * 24 * 60 * 60 * 1000;
 
 // Cookies opcionais: se existir cookies.txt na pasta do bot, é usado sozinho.
@@ -102,136 +125,94 @@ const COOKIES_PATH = [
     path.join(__dirname, '..', '..', 'cookies.txt')
 ].find(p => fs.existsSync(p)) || null;
 
-function ehTermux() {
-    return process.platform === 'android'
-        || !!process.env.TERMUX_VERSION
-        || String(process.env.PREFIX || '').includes('com.termux');
-}
-
-// Nome do binário oficial para este sistema (null = não existe/não roda aqui).
-function nomeBinarioOficial() {
-    if (ehTermux()) return null;
-    if (process.platform !== 'linux') return null;
-    if (process.arch === 'x64') return 'yt-dlp_linux';
-    if (process.arch === 'arm64') return 'yt-dlp_linux_aarch64';
-    if (process.arch === 'arm') return 'yt-dlp_linux_armv7l';
-    return null;
-}
-
-function baixarArquivo(url, destino, redir = 5) {
+function baixarArquivo(url, destino, redirecionamentos = 5) {
     return new Promise((resolve, reject) => {
         https.get(url, { headers: { 'User-Agent': 'node' } }, res => {
             if ([301, 302, 303, 307, 308].includes(res.statusCode) && res.headers.location) {
                 res.resume();
-                if (redir <= 0) return reject(new Error('Redirecionamentos demais'));
-                return resolve(baixarArquivo(res.headers.location, destino, redir - 1));
+                if (redirecionamentos <= 0) return reject(new Error('Redirecionamentos demais'));
+                return resolve(baixarArquivo(res.headers.location, destino, redirecionamentos - 1));
             }
-            if (res.statusCode !== 200) { res.resume(); return reject(new Error('HTTP ' + res.statusCode)); }
-            const arq = fs.createWriteStream(destino);
-            res.pipe(arq);
-            arq.on('finish', () => arq.close(() => resolve()));
-            arq.on('error', reject);
+            if (res.statusCode !== 200) {
+                res.resume();
+                return reject(new Error('HTTP ' + res.statusCode));
+            }
+            const arquivo = fs.createWriteStream(destino);
+            res.pipe(arquivo);
+            arquivo.on('finish', () => arquivo.close(() => resolve()));
+            arquivo.on('error', reject);
             res.on('error', reject);
         }).on('error', reject);
     });
 }
 
-// Testa se um comando funciona (ex.: "yt-dlp --version").
-// Devolve a versão (ex.: "2025.11.12") ou null se o comando não existir/não rodar.
-function testarComando(programa, argumentos) {
-    return new Promise(resolve => {
-        try {
-            execFile(programa, argumentos, { timeout: 15000 }, (erro, stdout) => {
-                const m = !erro && String(stdout || '').match(/\d{4}\.\d{2}\.\d{2}(?:\.\d+)?/);
-                resolve(m ? m[0] : null);
-            });
-        } catch { resolve(null); }
-    });
-}
-
-// Comando que será usado nos downloads (preenchido por garantirYtDlp).
-let YTDLP_BIN = null;
-let YTDLP_VERSAO = null;
 let ytdlpPromise = null;
-let avisouSemYtDlp = false;
 
-function mensagemSemYtDlp() {
-    return ehTermux()
-        ? 'yt-dlp não está instalado no Termux. Para baixar vídeos/TikTok/Instagram rode: pkg install yt-dlp  (o áudio do /play funciona sem ele).'
-        : 'yt-dlp indisponível neste servidor (o áudio do /play funciona pelas APIs).';
-}
+function garantirYtDlp() {
+    // Se o admin definiu um binário próprio no config, respeita.
+    const bin = config.MUSICA?.BINARIO;
+    if (bin && bin !== 'yt-dlp') return Promise.resolve(bin);
 
-async function detectarYtDlp() {
-    // 1) binário definido no config
-    const configurado = config.MUSICA?.BINARIO;
-    if (configurado && configurado !== 'yt-dlp') return configurado;
+    if (ytdlpPromise) return ytdlpPromise;
 
-    // 2) já instalado no sistema (Termux: pkg install yt-dlp / pip install yt-dlp)
-    YTDLP_VERSAO = await testarComando('yt-dlp', ['--version']);
-    if (YTDLP_VERSAO) return 'yt-dlp';
-
-    // 3) módulo Python
-    for (const py of ['python3', 'python']) {
-        YTDLP_VERSAO = await testarComando(py, ['-m', 'yt_dlp', '--version']);
-        if (YTDLP_VERSAO) return `${py} -m yt_dlp`;
-    }
-
-    // 4) binário baixado antes (e ainda recente)
-    const binarioOficial = nomeBinarioOficial();
-    YTDLP_VERSAO = fs.existsSync(YTDLP_PATH) ? await testarComando(YTDLP_PATH, ['--version']) : null;
-    if (YTDLP_VERSAO) {
+    ytdlpPromise = (async () => {
+        let existe = fs.existsSync(YTDLP_PATH);
         let velho = false;
-        try { velho = Date.now() - fs.statSync(YTDLP_PATH).mtimeMs > YTDLP_MAX_IDADE_MS; } catch {}
-        if (!velho || !binarioOficial) return `"${YTDLP_PATH}"`;
-    }
+        if (existe) {
+            try { velho = Date.now() - fs.statSync(YTDLP_PATH).mtimeMs > YTDLP_MAX_IDADE_MS; } catch {}
+            if (!velho) return YTDLP_PATH;
+        }
 
-    // 5) baixa — somente onde o binário oficial roda (hospedagem Linux)
-    if (!binarioOficial) return null;   // Termux/Android/outros: não baixa, não dá erro
-
-    console.log('⬇️ Baixando yt-dlp...');
-    const temp = YTDLP_PATH + '.novo';
-    try {
-        await baixarArquivo(YTDLP_URL_BASE + binarioOficial, temp);
-        fs.chmodSync(temp, 0o755);
-        fs.renameSync(temp, YTDLP_PATH);
-        console.log('✅ yt-dlp pronto em ' + YTDLP_PATH);
-        YTDLP_VERSAO = '9999.99.99';   // baixado agora = versão mais recente
-        return `"${YTDLP_PATH}"`;
-    } catch (erro) {
-        try { fs.unlinkSync(temp); } catch {}
-        console.log('⚠️ Não consegui baixar o yt-dlp: ' + erro.message);
-        if (fs.existsSync(YTDLP_PATH)) return `"${YTDLP_PATH}"`;  // usa o antigo se existir
-        return null;
-    }
-}
-
-// Retorna o comando do yt-dlp. Lança erro amigável se não existir (nunca trava o bot).
-async function garantirYtDlp() {
-    if (!ytdlpPromise) {
-        ytdlpPromise = detectarYtDlp().then(bin => {
-            YTDLP_BIN = bin;
-            if (!bin && !avisouSemYtDlp) {
-                avisouSemYtDlp = true;
-                console.log('ℹ️ ' + mensagemSemYtDlp());
+        console.log(existe ? '🔄 Atualizando yt-dlp...' : '⬇️ Baixando yt-dlp...');
+        const temp = YTDLP_PATH + '.novo';
+        try {
+            await baixarArquivo(YTDLP_URL, temp);
+            fs.chmodSync(temp, 0o755);
+            fs.renameSync(temp, YTDLP_PATH);
+            console.log('✅ yt-dlp pronto em ' + YTDLP_PATH);
+        } catch (erro) {
+            try { fs.unlinkSync(temp); } catch {}
+            console.log('❌ Falha ao baixar yt-dlp: ' + erro.message);
+            if (!existe) {
+                ytdlpPromise = null; // tenta de novo na próxima vez
+                throw new Error('yt-dlp não está instalado e não consegui baixar: ' + erro.message);
             }
-            if (!bin) setTimeout(() => { ytdlpPromise = null; }, 10 * 60 * 1000).unref?.(); // tenta de novo depois
-            return bin;
-        });
-    }
-    const bin = await ytdlpPromise;
-    if (!bin) throw new Error(mensagemSemYtDlp());
-    return bin;
+        }
+        return YTDLP_PATH;
+    })();
+
+    return ytdlpPromise;
 }
 
-// Já procura quando o bot liga (silencioso se não houver).
+// Apaga sobras de downloads que ficaram no meio (ex.: bot caiu) com mais de 30 min.
+try {
+    const limiteSobras = Date.now() - 30 * 60 * 1000;
+    for (const nome of fs.readdirSync(__dirname)) {
+        if (!/^\d{10,}_[a-z0-9]+/i.test(nome)) continue;
+        const caminho = path.join(__dirname, nome);
+        try { if (fs.statSync(caminho).mtimeMs < limiteSobras) fs.rmSync(caminho, { force: true }); } catch {}
+    }
+} catch {}
+
+// Já começa a baixar quando o bot liga (não trava nada se falhar).
+// yt-dlp é o ÚNICO jeito de baixar agora (sem API): já baixa o binário ao ligar.
 garantirYtDlp().catch(() => {});
 
 function comandoBase() {
-    const extra = config.MUSICA?.ARGS_EXTRA ? ` ${config.MUSICA.ARGS_EXTRA}` : "";
+
+    const extra =
+        config.MUSICA?.ARGS_EXTRA
+            ? ` ${config.MUSICA.ARGS_EXTRA}`
+            : "";
+
+    const binConfig = config.MUSICA?.BINARIO;
+    const bin = (binConfig && binConfig !== 'yt-dlp')
+        ? binConfig
+        : (fs.existsSync(YTDLP_PATH) ? `"${YTDLP_PATH}"` : 'yt-dlp');
+
     const cookies = COOKIES_PATH ? ` --cookies "${COOKIES_PATH}"` : "";
-    // "--js-runtimes" só existe em yt-dlp novos; em versão antiga daria "no such option".
-    const js = (!YTDLP_VERSAO || YTDLP_VERSAO >= '2025.11.01') ? ' --js-runtimes node' : '';
-    return `${YTDLP_BIN || 'yt-dlp'}${js}${cookies}${extra}`;
+
+    return `${bin} --js-runtimes node${cookies}${extra}`;
 }
 
 // =================================================
@@ -909,7 +890,7 @@ function listarUrlsCapa(info) {
 
 async function baixarCapaMusica(info) {
     for (const url of listarUrlsCapa(info)) {
-        const buffer = await comTimeout(baixarImagem(url), 3000, null);
+        const buffer = await comTimeout(baixarImagem(url), 8000, null);
         if (Buffer.isBuffer(buffer) && buffer.length > 2000) return buffer;
     }
     return null;
@@ -1037,21 +1018,56 @@ async function pesquisarResultadoYtDlp(busca, limite = 5) {
     return { ...candidatos[0], candidatos };
 }
 
+// Link do YouTube → dados do vídeo SEM yt-dlp (youtubei.js; se falhar, segue só com o ID).
+async function resolverLinkYoutube(busca) {
+    const link = busca.match(/https?:\/\/[^\s]+/i)?.[0]?.replace(/[),.;]+$/, "") || busca;
+    const id = extrairIdYoutube(link);
+    if (!id) throw new Error('Por enquanto o /play só aceita link do YouTube ou o nome da música.');
+    let titulo = 'Vídeo do YouTube', autor = '—', duracao = 0, views = 0, capa = null;
+    try {
+        const yt = await obterYoutubei();
+        const info = await Promise.race([
+            yt.getBasicInfo(id),
+            new Promise((_, rej) => setTimeout(() => rej(new Error('demorou')), 12000))
+        ]);
+        const b = info?.basic_info || {};
+        titulo = b.title || titulo;
+        autor = b.author || b.channel?.name || autor;
+        duracao = Number(b.duration || 0);
+        views = Number(b.view_count || 0);
+        capa = b.thumbnail?.[0]?.url || null;
+    } catch (e) { console.log('🔎 [youtubei.js] Não consegui os detalhes do link, seguindo só com o ID:', e.message); }
+    const item = {
+        id, webpage_url: `https://www.youtube.com/watch?v=${id}`, title: titulo,
+        uploader: autor, channel: autor, duration: duracao, view_count: views,
+        thumbnail: capa || `https://i.ytimg.com/vi/${id}/hqdefault.jpg`,
+        upload_date: null, timestamp: null
+    };
+    return { ...item, candidatos: [item] };
+}
+
 async function pesquisarResultado(busca, limite = 5) {
+    // Link do YouTube: pega os dados do vídeo (o yt-dlp baixa depois). Links de
+    // outros sites (TikTok, Instagram, Kwai...) seguem o fluxo normal.
+    if (extrairIdYoutube(busca.match(/https?:\/\/[^\s]+/i)?.[0] || '')) return resolverLinkYoutube(busca);
     // URLs já informadas continuam sendo resolvidas pelo fluxo original.
     if (!/https?:\/\/[^\s]+/i.test(busca)) {
-        try {
-            const resultado = await Promise.race([
-                pesquisarResultadoYoutubei(busca, limite),
-                new Promise((_, rejeitar) => setTimeout(
-                    () => rejeitar(new Error('youtubei.js demorou demais.')),
-                    12000
-                ))
-            ]);
-            console.log('🔎 [youtubei.js] Busca concluída.');
-            return resultado;
-        } catch (erroYoutubei) {
-            console.log(`🔎 [youtubei.js] Falhou, usando yt-dlp: ${erroYoutubei.message}`);
+        const tentativas = 2;
+        for (let i = 1; i <= tentativas; i++) {
+            try {
+                const resultado = await Promise.race([
+                    pesquisarResultadoYoutubei(busca, limite),
+                    new Promise((_, rejeitar) => setTimeout(
+                        () => rejeitar(new Error('youtubei.js demorou demais.')),
+                        12000
+                    ))
+                ]);
+                console.log('🔎 [youtubei.js] Busca concluída.');
+                return resultado;
+            } catch (erroYoutubei) {
+                console.log(`🔎 [youtubei.js] Falhou (${i}/${tentativas}): ${erroYoutubei.message}`);
+                youtubeiInstanciaPromise = null; // recria a sessão na próxima tentativa
+            }
         }
     }
 
@@ -1082,6 +1098,59 @@ function formatarInfoPlay(info) {
 }
 
 
+// =================================================
+// 🗂️ histórico interno (sem música aleatória)
+// =================================================
+const RANDOM_MUSIC_FILE = path.join(__dirname, "../dados/musicas-aleatorias.json");
+
+function lerHistoricoMusicaAleatoria() {
+    try {
+        if (!fs.existsSync(RANDOM_MUSIC_FILE)) return {};
+        const dados = JSON.parse(fs.readFileSync(RANDOM_MUSIC_FILE, 'utf8'));
+        return dados && typeof dados === 'object' ? dados : {};
+    } catch {
+        return {};
+    }
+}
+
+function salvarHistoricoMusicaAleatoria(db) {
+    try {
+        fs.writeFileSync(RANDOM_MUSIC_FILE, JSON.stringify(db, null, 2));
+    } catch (erro) {
+        console.error('⚠️ Não consegui salvar histórico da música aleatória:', erro.message);
+    }
+}
+
+function normalizarHistoricoAleatorio(historico, chave) {
+    const valor = historico[chave];
+    if (Array.isArray(valor)) return valor;
+    if (valor && typeof valor === 'object' && Array.isArray(valor.musicas)) {
+        return valor.musicas;
+    }
+    return [];
+}
+
+function registrarMusicaAleatoriaBaixada(historico, chave, info) {
+    const anteriores = normalizarHistoricoAleatorio(historico, chave);
+    const url = String(info?.webpage_url || info?.url || '').trim();
+    if (!url) return;
+    const registro = {
+        url,
+        id: info?.id || info?.display_id || null,
+        titulo: info?.title || 'Sem título',
+        baixadaEm: new Date().toISOString()
+    };
+    historico[chave] = [
+        ...anteriores.filter(item => {
+            const antigoUrl = typeof item === 'string' ? item : item?.url;
+            return antigoUrl !== url;
+        }),
+        registro
+    ].slice(-200);
+    salvarHistoricoMusicaAleatoria(historico);
+}
+
+
 function obterLinkCanalMusica() {
     const candidatos = [
         config.CHANNEL_URL, config.CHANNEL_LINK, config.CHANNEL,
@@ -1109,13 +1178,310 @@ async function enviarMensagemMusical(sock, jid, text, quoted, mentions) {
     if (buttons.length) {
         return enviarNativeFlow(sock, jid, {
             text,
-            footer: config.BOT_NAME || "LOBA KRYSSA - BOT",
+            footer: ASSINATURA,
             buttons,
             quoted,
             mentions
         });
     }
     return sock.sendMessage(jid, { text, mentions }, { quoted });
+}
+
+// =================================================
+// 🃏 CARD DO /PLAY (SÓ 2 BOTÕES: ÁUDIO e VER TUDO)
+// =================================================
+
+const ASSINATURA = config.BOT_NAME || 'Katrielly Bot';
+
+// Letras pequeninhas (small caps) em Unicode
+const MAPA_SC = {
+    a:'ᴀ',b:'ʙ',c:'ᴄ',d:'ᴅ',e:'ᴇ',f:'ꜰ',g:'ɢ',h:'ʜ',i:'ɪ',j:'ᴊ',k:'ᴋ',l:'ʟ',m:'ᴍ',
+    n:'ɴ',o:'ᴏ',p:'ᴘ',q:'ǫ',r:'ʀ',s:'ꜱ',t:'ᴛ',u:'ᴜ',v:'ᴠ',w:'ᴡ',x:'x',y:'ʏ',z:'ᴢ'
+};
+function sc(texto) {
+    return String(texto).normalize('NFD').split('')
+        .map(ch => MAPA_SC[ch.toLowerCase()] || ch)
+        .join('').normalize('NFC');
+}
+
+function botaoCopiarPlay(texto, codigo) {
+    const m = require('../menuBotoes/menuBotoes');
+    if (typeof m.botaoCopiar === 'function') return m.botaoCopiar(texto, codigo);
+    return {
+        name: 'cta_copy',
+        buttonParamsJson: JSON.stringify({ display_text: texto, id: 'copiar_link', copy_code: codigo })
+    };
+}
+
+function textoCardPlay(info) {
+    const duracao = formatDuration(info.duration);
+    const views = formatViews(info.view_count);
+    let data = "";
+    if (info.upload_date) data = formatUploadDate(info.upload_date);
+
+    return [
+        `〔 🎧 ${sc('música encontrada')} 〕`,
+        ``,
+        `  🎵 ${sc('título')} ➜ *${info.title || "Sem título"}*`,
+        `  🎤 ${sc('artista')} ➜ ${info.uploader || info.channel || "—"}`,
+        `  ⏱️ ${sc('duração')} ➜ ${duracao || "—"}`,
+        views && views !== "0" ? `  👁️ ${sc('views')} ➜ ${views}` : null,
+        data ? `  📅 ${sc('data')} ➜ ${data}` : null,
+        ``,
+        `✦ ${sc('escolha uma opção abaixo')} ✦`
+    ].filter(x => x !== null).join("\n");
+}
+
+async function enviarCardPlay(sock, msg, from, info, candidatos) {
+    const token = salvarResultadoPlay({
+        jid: from,
+        solicitante: msg?.key?.participant || msg?.key?.remoteJid,
+        url: info.webpage_url,
+        info,
+        candidatos,
+        lista: candidatos
+    });
+
+    const capaBuffer = await baixarCapaMusica(info);
+    const texto = textoCardPlay(info);
+
+    // SÓ 2 BOTÕES: ÁUDIO (resposta rápida) + VER TUDO (single_select).
+    // O VER TUDO abre a lista nativa do WhatsApp direto, sem outra mensagem.
+    const corta = (t, n) => {
+        t = String(t || "");
+        return t.length > n ? t.slice(0, n - 1) + "…" : t;
+    };
+
+    // Outras versões / outros cantores (usado na lista "TODAS AS OPÇÕES").
+    const versoes = [];
+    candidatos.slice(0, 12).forEach((c, i) => {
+        if (!c?.webpage_url || c.webpage_url === info.webpage_url) return;
+        versoes.push({
+            header: '',
+            title: corta(c.title || 'Sem título', 24),
+            description: corta(`${c.channel || c.uploader || '—'} • ${formatDuration(c.duration)}`, 72),
+            id: `play_pick:${token}:${i}`
+        });
+    });
+
+    // VER TUDO -> sub-lista igual ao print antigo:
+    // baixar (vídeo/documento), youtube (abrir/copiar) e "TODAS AS OPÇÕES"
+    // (outras versões e outros cantores).
+    const secoes = [
+        {
+            title: '⬇️ BAIXAR',
+            highlight_label: '',
+            rows: [
+                { header: '', title: '🎬 VÍDEO', description: 'Baixar o vídeo em MP4', id: `play_video:${token}` },
+                { header: '', title: '📄 DOCUMENTO', description: 'Receber como arquivo', id: `play_doc:${token}` }
+            ]
+        },
+        {
+            title: '📂 MAIS',
+            highlight_label: '',
+            rows: [
+                { header: '', title: '📂 TODAS AS OPÇÕES', description: 'Outras versões e outros cantores', id: `play_outras:${token}` }
+            ]
+        }
+    ];
+
+    const verTudo = {
+        name: 'single_select',
+        buttonParamsJson: JSON.stringify({ title: '📋 VER TUDO', sections: secoes })
+    };
+
+    // Padrão: igual ao bot da LordeHost. Botões: ÁUDIO, VÍDEO, TODAS AS OPÇÕES
+    // (botão de lista que abre a 2ª lista direto), ABRIR NO YOUTUBE, COPIAR LINK
+    // e um link do criador. O WhatsApp junta isso em "ÁUDIO + VER TUDO".
+    // 6 botões reais (áudio, vídeo, todas as opções, abrir YouTube, copiar link, criador)
+    // + bottom_sheet: o WhatsApp mostra só ÁUDIO + VER TUDO e o resto vai pra folha.
+    // Para o modelo simples: config.MUSICA.VER_TUDO_ANINHADO = false
+    let botoes;
+    if (config.MUSICA?.VER_TUDO_ANINHADO !== false) {
+        const link = info.webpage_url || info.url;
+        const secoesTodas = [{
+            title: '📥 BAIXAR',
+            highlight_label: '',
+            rows: [{ header: '', title: '📄 DOCUMENTO', description: 'Receber como arquivo', id: `play_doc:${token}` }]
+        }];
+        if (versoes.length) {
+            secoesTodas.push({ title: '🎤 OUTRAS VERSÕES E CANTORES', highlight_label: '', rows: versoes });
+        }
+        const todasAsOpcoes = {
+            name: 'single_select',
+            buttonParamsJson: JSON.stringify({ title: '📂 TODAS AS OPÇÕES', sections: secoesTodas })
+        };
+
+        botoes = [
+            botao("🎵 ÁUDIO", `play_audio:${token}`),
+            botao("🎬 VÍDEO", `play_video:${token}`),
+            todasAsOpcoes
+        ];
+        if (link) {
+            botoes.push(botaoUrl("▶️ ABRIR NO YOUTUBE", link));
+            botoes.push(botaoCopiarPlay("📋 COPIAR LINK", link));
+        }
+        const linkCriador = obterLinkCriadorMusica();
+        if (linkCriador) botoes.push(botaoUrl("💬 FALAR COM O CRIADOR", linkCriador));
+    } else {
+        botoes = [botao("🎵 ÁUDIO", `play_audio:${token}`), verTudo];
+    }
+
+    await enviarNativeFlow(sock, from, {
+        text: texto,
+        footer: ASSINATURA,
+        buttons: botoes,
+        imageBuffer: capaBuffer,
+        quoted: msg,
+        // Faz o WhatsApp mostrar só o 1º botão + "VER TUDO"; o resto abre na folha.
+        messageParamsJson: JSON.stringify({
+            bottom_sheet: {
+                in_thread_buttons_limit: 1,
+                divider_indices: [1, 2, 3, 4, 5, 999],
+                list_title: '🎶 OPÇÕES DO PLAY',
+                button_title: '📋 VER TUDO'
+            }
+        })
+    });
+}
+
+function obterResultadoPlayValido(sock, msg, token) {
+    const from = msg?.key?.remoteJid;
+    const resultado = resultadosPlay.get(token);
+    if (!from || !resultado) {
+        enviarMensagemMusical(sock, from, "⚠️ Esse resultado do /play expirou. Faça a pesquisa novamente.", msg);
+        return null;
+    }
+    const autor = msg?.key?.participant || msg?.key?.remoteJid;
+    if (resultado.jid !== from || (resultado.solicitante && autor && resultado.solicitante !== autor)) {
+        enviarMensagemMusical(sock, from, "⚠️ Esse resultado foi solicitado por outro usuário.", msg);
+        return null;
+    }
+    return resultado;
+}
+
+// 📋 VER TUDO -> lista nativa do WhatsApp (personalizada)
+async function enviarOpcoesPlay(sock, msg, token) {
+    const resultado = obterResultadoPlayValido(sock, msg, token);
+    if (!resultado) return;
+
+    const { enviarListaWhatsApp } = require('../menuBotoes/menuBotoes');
+    const info = resultado.info || {};
+
+    const corta = (t, n) => {
+        t = String(t || "");
+        return t.length > n ? t.slice(0, n - 1) + "…" : t;
+    };
+
+    return enviarListaWhatsApp(sock, msg.key.remoteJid, {
+        text:
+`〔 🎶 ${sc('opções do play')} 〕
+
+🎵 *${corta(info.title || "Resultado", 60)}*
+🎤 ${info.uploader || info.channel || "—"}
+
+✦ ${sc('escolha uma opção na lista')} ✦`,
+        title: `🎶 ${sc('ver opções')}`,
+        buttonText: `🎶 ${sc('abrir lista')}`,
+        footer: ASSINATURA,
+        quoted: msg,
+        sections: [
+            {
+                title: `⬇️ ${sc('baixar')}`,
+                rows: [
+                    { id: `play_audio:${token}`, title: `🎧 ${sc('áudio')}`, description: 'Baixar só o áudio da música' },
+                    { id: `play_video:${token}`, title: `🎬 ${sc('vídeo')}`, description: 'Baixar o vídeo em MP4' },
+                    { id: `play_doc:${token}`,   title: `📄 ${sc('documento')}`, description: 'Receber como arquivo' }
+                ]
+            },
+            {
+                title: `🔗 ${sc('youtube')}`,
+                rows: [
+                    { id: `play_yt:${token}`,   title: `▶️ ${sc('abrir no youtube')}`, description: 'Abre essa música direto no YouTube' },
+                    { id: `play_link:${token}`, title: `📋 ${sc('copiar link')}`, description: 'Copia o link da música' }
+                ]
+            },
+            {
+                title: `📂 ${sc('mais')}`,
+                rows: [
+                    { id: `play_outras:${token}`, title: `🎤 ${sc('todas as opções')}`, description: 'Outras versões e outros cantores' }
+                ]
+            }
+        ]
+    });
+}
+
+// ▶️ ABRIR NO YOUTUBE / 📋 COPIAR LINK
+async function enviarLinkPlay(sock, msg, token, tipo) {
+    const resultado = obterResultadoPlayValido(sock, msg, token);
+    if (!resultado) return;
+
+    const info = resultado.info || {};
+    const link = info.webpage_url || resultado.url;
+    if (!link) return;
+
+    const botoes = tipo === 'yt'
+        ? [botaoUrl(`▶️ ${sc('abrir no youtube')}`, link)]
+        : [botaoCopiarPlay(`📋 ${sc('copiar link')}`, link)];
+
+    await enviarNativeFlow(sock, msg.key.remoteJid, {
+        text: `〔 ${tipo === 'yt' ? '▶️' : '🔗'} ${sc(tipo === 'yt' ? 'youtube' : 'link da música')} 〕\n\n🎵 *${info.title || "Resultado"}*\n\n${link}`,
+        footer: ASSINATURA,
+        buttons: botoes,
+        quoted: msg
+    });
+}
+
+// 📂 TODAS AS OPÇÕES: lista com as outras versões/cantores encontrados
+async function enviarListaOutrasVersoes(sock, msg, token) {
+    const resultado = obterResultadoPlayValido(sock, msg, token);
+    if (!resultado) return;
+
+    const { enviarListaWhatsApp } = require('../menuBotoes/menuBotoes');
+    const lista = (resultado.lista || resultado.candidatos || []).slice(0, 10);
+
+    if (lista.length < 2) {
+        return enviarMensagemMusical(sock, msg.key.remoteJid, "⚠️ Não encontrei outras versões dessa música.", msg);
+    }
+
+    const corta = (t, n) => {
+        t = String(t || "");
+        return t.length > n ? t.slice(0, n - 1) + "…" : t;
+    };
+
+    const rows = lista.map((c, i) => ({
+        id: `play_pick:${token}:${i}`,
+        title: corta(c.title || "Sem título", 24),
+        description: corta(
+            `${c.channel || c.uploader || "—"} • ${formatDuration(c.duration)}`,
+            72
+        )
+    }));
+
+    return enviarListaWhatsApp(sock, msg.key.remoteJid, {
+        text: `〔 📂 ${sc('todas as opções')} 〕\n\n🔍 ${sc('escolha a versão ou o cantor')}\n📚 ${lista.length} ${sc('resultados')}`,
+        title: `📂 ${sc('escolher versão')}`,
+        buttonText: `🎤 ${sc('ver versões')}`,
+        footer: ASSINATURA,
+        quoted: msg,
+        sections: [{ title: `🎶 ${sc('resultados')}`, rows }]
+    });
+}
+
+// Escolheu uma versão da lista -> manda um novo card (de novo com 2 botões)
+async function escolherVersaoPlay(sock, msg, token, indice) {
+    const resultado = obterResultadoPlayValido(sock, msg, token);
+    if (!resultado) return;
+
+    const lista = resultado.lista || resultado.candidatos || [];
+    const escolhido = lista[indice];
+    if (!escolhido) {
+        return enviarMensagemMusical(sock, msg.key.remoteJid, "⚠️ Opção inválida. Faça a pesquisa novamente.", msg);
+    }
+
+    // O escolhido vai primeiro (o download usa sempre o candidatos[0]).
+    const candidatos = [escolhido, ...lista.filter(x => x !== escolhido)];
+    await enviarCardPlay(sock, msg, msg.key.remoteJid, { ...escolhido, candidatos }, candidatos);
 }
 
 exports.baixarMusica = async function(sock, msg, args = []) {
@@ -1138,41 +1504,10 @@ exports.baixarMusica = async function(sock, msg, args = []) {
     }
 
     try {
-        const info = await pesquisarResultado(busca);
-        const token = salvarResultadoPlay({
-            jid: from,
-            solicitante: msg?.key?.participant || msg?.key?.remoteJid,
-            url: info.webpage_url,
-            info,
-            candidatos: info.candidatos || [info]
-        });
-
-        const capaBuffer = await baixarCapaMusica(info);
-
-        const texto = [
-            `〔 🎵 RESULTADO 〕`,
-            formatarInfoPlay(info),
-            "Escolha o formato abaixo:"
-        ].join("\n");
-
-        const buttons = [
-            botao("🎵 ÁUDIO", `play_audio:${token}`),
-            botao("🎬 VÍDEO", `play_video:${token}`),
-            botao("📄 DOCUMENTO", `play_doc:${token}`)
-        ];
-
-        // Em toda mensagem do fluxo musical, o canal fica disponível
-        // diretamente, sem abrir outro menu.
-        const linkCanal = obterLinkCanalMusica();
-        if (linkCanal) buttons.push(botaoUrl("📢 ENTRAR NO CANAL", linkCanal));
-
-        await enviarNativeFlow(sock, from, {
-            text: texto,
-            footer: config.BOT_NAME || "Katrielly Bot",
-            buttons,
-            imageBuffer: capaBuffer,
-            quoted: msg
-        });
+        // Busca até 10 resultados: o 1º vira o card; os outros ficam
+        // guardados para o botão VER TUDO -> OUTRAS VERSÕES.
+        const info = await pesquisarResultado(busca, 10);
+        await enviarCardPlay(sock, msg, from, info, info.candidatos || [info]);
 
     } catch (erro) {
         console.error("❌ /play pesquisa:", erro);
@@ -1240,14 +1575,19 @@ async function baixarResultadoPlay(sock, msg, token, modo, opcoes = {}) {
         // =========================================================
         // Nenhum dos fluxos converte o áudio para MP3/AAC/Opus: o arquivo
         // baixado é enviado no formato original.
-        const clientes = [
-            '--extractor-args "youtube:player_client=android,ios"',
-            '--extractor-args "youtube:player_client=android"',
-            ''
-        ];
+        const clientes = resultado.randomMusic
+            ? [
+                '--extractor-args "youtube:player_client=android,ios"'
+              ]
+            : [
+                '--extractor-args "youtube:player_client=android,ios"',
+                '--extractor-args "youtube:player_client=android"',
+                ''
+              ];
 
-        // /play: baixa SÓ o que apareceu no resultado (não troca por outra música).
-        const alvosYt = [candidatos[0] || info];
+        // /play: baixa SÓ o que apareceu no card (não troca por outra música).
+        // Aleatória: pode usar as reservas se o sorteado estiver indisponível.
+        const alvosYt = resultado.randomMusic ? candidatos.slice(0, 5) : [candidatos[0] || info];
         const TIMEOUT_YT = ehAudio ? 50000 : 120000;
         const dormir = ms => new Promise(r => setTimeout(r, ms));
 
@@ -1268,9 +1608,13 @@ async function baixarResultadoPlay(sock, msg, token, modo, opcoes = {}) {
 
                 for (const cliente of clientes) {
                     if (ctl?.cancelado) return null;
+                    const filtroDuracao = resultado.randomMusic?.maxDuration
+                        ? `--match-filter "duration <= ${Number(resultado.randomMusic.maxDuration)}" `
+                        : '';
                     const comando =
                         `${comandoBase()} "${alvo}" ` +
                         `${formato} --no-playlist --no-warnings ` +
+                        `${filtroDuracao}` +
                         `${cliente} --retries 1 --fragment-retries 1 --concurrent-fragments 8 ` +
                         `--socket-timeout 10 --extractor-retries 1 ` +
                         `--print-json -o "${tmpl}.%(ext)s"`;
@@ -1292,96 +1636,22 @@ async function baixarResultadoPlay(sock, msg, token, modo, opcoes = {}) {
             return null;
         };
 
-        // ---------- API (só áudio) ----------
-        const usarApi = ehAudio && config.MUSICA?.USAR_API !== false;
-
-        const rodarApi = async (tmpl, ctl) => {
-            const duracaoMax = Number(config.MUSICA?.API_MAX_DURACAO ?? 1200);
-            const alvosApi = [{ ...info, webpage_url: info.webpage_url || info.url || resultado.url }];
-
-            for (const alvoApi of alvosApi) {
-                if (ctl.cancelado) return null;
-                const linkApi = alvoApi.webpage_url || alvoApi.url;
-                const duracao = Number(alvoApi.duration || 0);
-                if (!linkApi) continue;
-                if (duracaoMax > 0 && duracao > duracaoMax) {
-                    console.log(`🎵 [API] Pulada: duração ${duracao}s acima do limite (${duracaoMax}s).`);
-                    continue;
-                }
-                try {
-                    const via = await baixarAudioApi(linkApi, tmpl, { qualidade: config.MUSICA?.API_QUALIDADE || 128 });
-                    const achado = encontrarArquivo(tmpl, modo);
-                    if (!achado) throw new Error("O download pela API terminou, mas o arquivo não foi encontrado.");
-                    return { arquivo: achado, titulo: via.titulo || null, alvo: alvoApi, origem: 'api' };
-                } catch (erroApi) {
-                    console.log(`🎵 [API] Falhou: ${erroApi.message}`);
-                    ultimoErro = erroApi;
-                    limparArquivos(tmpl);
-                    if (/em pausa/i.test(String(erroApi.message))) break; // API toda fora: nem insiste
-                }
-            }
-            return null;
-        };
-
-        // Aplica o resultado de quem GANHOU (arquivo e título).
+        // Aplica o resultado de quem GANHOU (título e, na aleatória, o vídeo certo no histórico).
         const aplicarVencedor = v => {
             arquivoReal = v.arquivo;
             if (v.titulo && (v.origem === 'yt-dlp' || !info.title)) info.title = v.titulo;
+            if (resultado.randomMusic && v.alvo?.webpage_url && v.alvo.webpage_url !== info.webpage_url) {
+                Object.assign(info, {
+                    webpage_url: v.alvo.webpage_url,
+                    url: v.alvo.url || v.alvo.webpage_url,
+                    title: v.titulo || v.alvo.title || info.title
+                });
+            }
         };
 
-        if (usarApi && config.MUSICA?.AUDIO_SOMENTE_API !== false) {
-            // 🎀 ÁUDIO SOMENTE POR API / BIBLIOTECA (sem yt-dlp).
-            // Cadeia: Savetube → Vreden → YouTube.js (src/ytapi + src/ytlib).
-            // Se a cadeia inteira falhar, tenta de novo uma vez antes de desistir.
-            let r = null;
-            for (let tentativa = 1; tentativa <= 2 && !r; tentativa++) {
-                r = await rodarApi(`${template}_api`, { cancelado: false });
-                if (!r && tentativa < 2) await dormir(1500);
-            }
-            if (r) {
-                console.log(`⚡ [MÚSICA] Entregue por: ${r.origem}`);
-                aplicarVencedor(r);
-            }
-        } else if (usarApi) {
-            // ⚡ CORRIDA: a API começa na hora; se ela não entregar em HEDGE_MS
-            // (ou falhar), o yt-dlp entra em paralelo. Vence quem terminar primeiro
-            // e o outro é cancelado. Assim a espera é a do mais rápido, não a soma.
-            const hedgeMs = Number(config.MUSICA?.HEDGE_MS ?? 3500);
-            const ctlApi = { cancelado: false };
-            const ctlYt = { cancelado: false, filho: null };
-            const tmplApi = `${template}_api`;
-            const tmplYt = `${template}_yt`;
-
-            const apiP = rodarApi(tmplApi, ctlApi).catch(() => null);
-            const ytP = (async () => {
-                let apiRes = null;
-                await Promise.race([apiP.then(r => { apiRes = r; }), dormir(hedgeMs)]);
-                if (apiRes) return null; // API já entregou
-                return rodarYtDlp(tmplYt, ctlYt);
-            })().catch(() => null);
-
-            const vencedor = await new Promise(resolve => {
-                let restantes = 2;
-                const fim = () => { if (--restantes === 0) resolve(null); };
-                apiP.then(r => { if (r) resolve(r); }).finally(fim);
-                ytP.then(r => { if (r) resolve(r); }).finally(fim);
-            });
-
-            if (vencedor?.origem === 'api') {
-                ctlYt.cancelado = true; matarFilho(ctlYt);
-                ytP.finally(() => limparArquivos(tmplYt));
-            } else {
-                ctlApi.cancelado = true;
-                apiP.finally(() => limparArquivos(tmplApi));
-            }
-            if (vencedor) {
-                console.log(`⚡ [MÚSICA] Entregue por: ${vencedor.origem}`);
-                aplicarVencedor(vencedor);
-            }
-        } else {
-            const r = await rodarYtDlp(template, null);
-            if (r) aplicarVencedor(r);
-        }
+        // ⬇️ DOWNLOAD DIRETO DO YOUTUBE PELO yt-dlp (igual o vídeo). Sem API.
+        const r = await rodarYtDlp(template, null);
+        if (r) aplicarVencedor(r);
 
         if (!arquivoReal) {
             throw ultimoErro || new Error("Não foi possível baixar o resultado.");
@@ -1398,7 +1668,15 @@ async function baixarResultadoPlay(sock, msg, token, modo, opcoes = {}) {
 
         const ext = path.extname(arquivoReal).toLowerCase();
 
-        if (modo === "audio") {
+        if (modo === "audio" && buffer.length > 90 * 1024 * 1024) {
+            // arquivo gigante: o WhatsApp recusa como áudio, então vai como documento
+            await sock.sendMessage(from, {
+                document: buffer,
+                mimetype: ext === ".mp3" ? "audio/mpeg" : "audio/mp4",
+                fileName: `${titulo}${ext || ".mp3"}`
+            }, { quoted: msg });
+
+        } else if (modo === "audio") {
             const mimetype =
                 ext === ".webm" ? "audio/ogg; codecs=opus" :
                 ext === ".opus" ? "audio/ogg; codecs=opus" :
@@ -1427,6 +1705,17 @@ async function baixarResultadoPlay(sock, msg, token, modo, opcoes = {}) {
             }, { quoted: msg });
         }
 
+        // Confirma o histórico SOMENTE depois que o arquivo foi entregue.
+        // Assim um erro de download não "gasta" a música sorteada.
+        if (resultado.randomMusic?.historicoChave) {
+            const historico = lerHistoricoMusicaAleatoria();
+            registrarMusicaAleatoriaBaixada(
+                historico,
+                resultado.randomMusic.historicoChave,
+                info
+            );
+        }
+
         if (!silencioso) {
             await enviarMensagemMusical(
                 sock,
@@ -1438,20 +1727,56 @@ async function baixarResultadoPlay(sock, msg, token, modo, opcoes = {}) {
 
     } catch (erro) {
         console.error("❌ /play download:", erro);
+        const bruto = String(erro?.message || erro || "");
+        let motivo;
+        if (/confirm your age|members-only|sign in to confirm|login required|cookies|is not a bot|bot\b/i.test(bruto))
+            motivo = "O YouTube bloqueou o download dessa música (pediu login/confirmação). Tenta outra música ou manda o link direto.";
+        else if (/unavailable|private|removed|terminated|not available|blocked|copyright|geo/i.test(bruto))
+            motivo = "Esse vídeo está indisponível (privado, removido ou bloqueado na região). Tenta outra versão.";
+        else if (/429|too many requests/i.test(bruto))
+            motivo = "O YouTube está limitando os downloads agora (muitos pedidos de uma vez). Espera um pouco e tenta de novo.";
+        else if (/arquivo não foi encontrado|vazio|empty/i.test(bruto))
+            motivo = "Até baixou, mas o arquivo veio vazio/corrompido. Tenta de novo.";
+        else if (/não encontr|no results|nada encontrado/i.test(bruto))
+            motivo = "Não achei nada com esse nome. Confere o nome da música ou manda o link direto.";
+        else if (/timeout|tempo esgotado|demorou|network|socket|getaddrinfo|econn|enotfound/i.test(bruto))
+            motivo = "A conexão falhou ou demorou demais pra baixar. Tenta de novo em instantes.";
+        else
+            motivo = bruto || "Não foi possível concluir o download.";
         await enviarMensagemMusical(
             sock,
             from,
-`〔 ❌ ERRO NO DOWNLOAD 〕\n\n🎵 *${info.title || "Resultado"}*\n⚠️ ${erro.message || "Não foi possível concluir o download."}`,
+`〔 ❌ NÃO CONSEGUI BAIXAR 〕\n\n🎵 *${info.title || "Resultado"}*\n⚠️ ${motivo}`,
             msg
         );
     } finally {
         limparArquivos(template);
-        resultadosPlay.delete(token);
+        // Só a aleatória apaga o token; no /play ele continua valendo (10 min)
+        // pra pessoa poder pedir também o vídeo, ver outras versões etc.
+        if (resultado.randomMusic) resultadosPlay.delete(token);
     }
 }
 
 exports.processarEscolhaPlay = async function(sock, msg, idBotao) {
-    const match = String(idBotao || "").match(/^play_(audio|video|doc):(.+)$/);
+    const id = String(idBotao || "");
+
+    // 📋 VER TUDO / 📂 TODAS AS OPÇÕES
+    let m = id.match(/^play_(todos|outras|yt|link):(.+)$/);
+    if (m) {
+        if (m[1] === "todos") await enviarOpcoesPlay(sock, msg, m[2]);
+        else if (m[1] === "outras") await enviarListaOutrasVersoes(sock, msg, m[2]);
+        else await enviarLinkPlay(sock, msg, m[2], m[1]);
+        return true;
+    }
+
+    // Escolheu uma versão na lista
+    m = id.match(/^play_pick:([^:]+):(\d+)$/);
+    if (m) {
+        await escolherVersaoPlay(sock, msg, m[1], Number(m[2]));
+        return true;
+    }
+
+    const match = id.match(/^play_(audio|video|doc):(.+)$/);
     if (!match) return false;
 
     const modo = match[1];

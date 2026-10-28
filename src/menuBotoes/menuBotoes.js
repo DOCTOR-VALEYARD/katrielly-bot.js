@@ -204,15 +204,15 @@ function extrairComandosDoBot() {
 }
 
 const CATEGORIAS = {
-  '🎵 MÚSICAS': ['play','katrielly-yt','video','tiktok','instagram','kwai','pinterest','mediafire','gtts','tomp3','s','addfigurinha','gif','toimg','artenome','artenomegif','meme'],
+  '🎵 MÚSICAS': ['play','katrielly-yt','video','tiktok','instagram','kwai','pinterest','mediafire','gtts','tomp3','s','addfigurinha','togif','toimg','artenome','artenomegif','meme'],
   '🎙️ EFEITOS': ['voz','efeitos','logos','masculino','feminino','crianca','bebe','idoso','gigante','esquilo','grave','demonio','caverna','banheiro','igreja','estadio','tunel','agua','megafone','walkie','telefone','eco','radio','alien','fantasma','bebado','8bit','distorcao','reverso','coral','dueto','robo','vaporwave','nightcore','rapido','lento'],
-  '🛠️ FERRAMENTAS': ['calc','calculadora','base64','md5','hashmd5','spoiler','encurtar','encurtador','encurtarlink','qrcode','qr','qr-code','wiki','traduzir','tradutor','celular','tempo','esporte_noticias','me','tang','caca','spam','info','avalie','bug','sugestao','ping','meuid'],
+  '🛠️ FERRAMENTAS': ['nick','tabela','geralink','calc','calculadora','base64','md5','hashmd5','spoiler','encurtar','encurtador','encurtarlink','qrcode','qr','qr-code','wiki','traduzir','tradutor','celular','tempo','esporte_noticias','me','tang','caca','spam','info','avalie','bug','sugestao','ping','meuid'],
   '👤 MEMBROS': ['alugarbot','meualuguel','membros','registrar','delregistro','perfil','inforegistrar','infoperfil','advertidos','mutados','infoadv','infomute','infobot','atividades','resumo','historico','conquistas','botstatus','top10','rankativo','rank'],
   '💰 ECONOMIA': ['gold','daily','saldo','moedas','checkin','checkinauto','trabalhar','roubar','transferir','depositar','sacar','extrato','inventario','bonus','premio','xp','nivel','loja','duelo','resgatar','token','gastar','topgold','topxp','topamizade','topcasais','casal','amizade','compatibilidade','dupla','familia','familias','casamento','meucasal','divorcio','presente','presentes','missoes','missao'],
   '🎮 BRINCADEIRAS': ['brincadeiras','forca','adivinha','quiz','jogodavelha','aleatory','roleta','sortear','signo','enquete','tapa','matar','chute','beijar','abracar'],
   // 🔒 Todas as proteções do grupo ficam juntas (somente administradores).
-  '🔒 PROTEÇÕES': ['antitrava','antiloc','antidoc','antiimg','antivideo','antilink','antinota','antinudes','antifake','antipalavrao','katrielly-antipalavrao','antispam','antiflood','somenteadm'],
-  '🛡️ ADMIN': ['mute','unmute','warn','unwarn','autoban','marcar','hidetag','citar','regras','grupo','convite','promover','rebaixar','ban','kick','abrir','fechar','aviso','bemvindo','sair','saudacao','antiamor','aceitar','mencao','adms','admins','statusadm','limpar','katrielly-auto','katrielly1','katrielly0','lista','listra','blacklist','katrielly-lista','tirarlista','removerlista','delblacklist','add','katrielly-add','modulos','limparbot','logban','historico-ban','relatorio','relatoriodiario','manutencao'],
+  '🔒 PROTEÇÕES': ['antitrava','antip','antib','antir','antig','antiloc','antidoc','antiimg','antivideo','antilink','antinota','antinudes','antifake','antipalavrao','katrielly-antipalavrao','antispam','antiflood','somenteadm'],
+  '🛡️ ADMIN': ['antip','antib','antir','antig','mute','unmute','warn','unwarn','autoban','marcar','hidetag','citar','regras','grupo','convite','promover','rebaixar','ban','kick','abrir','fechar','aviso','bemvindo','sair','saudacao','antiamor','aceitar','mencao','adms','admins','statusadm','limpar','katrielly-auto','katrielly1','katrielly0','lista','listra','blacklist','katrielly-lista','tirarlista','removerlista','delblacklist','add','katrielly-add','modulos','limparbot','logban','historico-ban','relatorio','relatoriodiario','manutencao'],
   '👑 DONO': ['ligar','desligar','restart','broadcast','boot','backup','configaniversario','configaniversario-reset','alugar']
 };
 
@@ -456,7 +456,7 @@ function comandoPrecisaEntrada(command) {
   return new Set([
     'play','musica','katrielly-yt','video','baixarvideo','tiktok','instagram','kwai','pinterest','mediafire','media-fire',
     'gtts','tomp3','artenome','artenomegif','meme','signo','tempo','celular','wiki','traduzir','tradutor',
-    'calc','calculadora','base64','md5','hashmd5','spoiler','encurtar','encurtador','encurtarlink','qrcode','qr','qr-code',
+    'nick','calc','calculadora','base64','md5','hashmd5','spoiler','encurtar','encurtador','encurtarlink','qrcode','qr','qr-code',
     'roubar','transferir','depositar','sacar','presente','resgatar','token','gastar','warn','unwarn','mute','unmute',
     'autoban','configaniversario','manutencao','broadcast','spam','add','katrielly-prt','katrielly-ptr','caca','caça','tang',
     'quando','chance','vab','adivinharnmr','configurar-bot','matar','tapa','beijar','abracar','chute'
@@ -469,6 +469,7 @@ function textoPrompt(command) {
   if (['play','musica'].includes(c)) return '🎵 Qual música você deseja baixar?\n\nDigite somente o nome da música.';
   if (['video','baixarvideo'].includes(c)) return '🎬 Qual vídeo você deseja baixar?\n\nDigite o nome ou envie o link.';
   if (['tiktok','instagram','kwai','pinterest','mediafire','media-fire'].includes(c)) return `🔗 Envie o link para *${c}*.`;
+  if (c === 'nick') return '✨ Digite o nome que você quer transformar em nick.';
   if (c === 'configurar-bot') return '⚙️ Envie a configuração que deseja alterar. Ex.: *prefixo !*';
   return `✍️ Envie agora os dados necessários para *${c}*.`;
 }

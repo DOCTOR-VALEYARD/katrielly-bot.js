@@ -50,7 +50,7 @@ async function menuadm(sock, msg) {
         acesso: "administrativo",
         secoes: [
             { emoji: "🔒", titulo: "PROTEÇÕES", itens: [
-                "antitrava", "antiloc", "antidoc", "antiimg", "antivideo", "antilink", "antinota",
+                "antitrava", "antip", "antib", "antir", "antig", "antiloc", "antidoc", "antiimg", "antivideo", "antilink", "antinota",
                 "antinudes", "antifake", "antispam", "antiflood", "somenteadm", "antipalavrao",
                 "antiamor", "antinsfw"
             ] },

@@ -41,7 +41,7 @@ function executarComando(comando, argumentos) {
         processo.stdout.on("data", p => { saida += String(p); });
         processo.stderr.on("data", p => { erro += String(p); });
         processo.once("error", e => {
-            if (e.code === "ENOENT") reject(new Error(`comando "${comando}" não encontrado (rode: pkg install libwebp)`));
+            if (e.code === "ENOENT") reject(new Error(`comando "${comando}" não encontrado (instale libwebp — ou ignore: o bot já converte sozinho em Node)`));
             else reject(e);
         });
         processo.once("close", codigo => {
@@ -90,6 +90,151 @@ async function converterWebpAnimadoViaFrames(tempEntrada, tempSaida, pastaQuadro
         "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2,fps=12",
         "-t", "6", "-crf", "24", "-preset", "ultrafast", "-an", tempSaida
     ]);
+}
+
+// 🧩 DECODIFICADOR DE WEBP ANIMADO 100% EM NODE (sem webpmux/dwebp)
+// Lê o container do WebP (RIFF → ANMF), recorta cada frame como um WebP
+// "parado" e usa o @napi-rs/canvas (que o bot já tem) pra decodificar e
+// montar cada quadro — respeitando posição, mistura (blend) e descarte
+// (dispose). Funciona em qualquer hospedagem: não depende de libwebp
+// instalada no sistema nem do decoder de WebP animado do FFmpeg (que
+// falha com "image data not found" em vários builds).
+function lerContainerWebp(buffer) {
+    if (buffer.length < 20 || buffer.toString("ascii", 0, 4) !== "RIFF" || buffer.toString("ascii", 8, 12) !== "WEBP") {
+        throw new Error("arquivo não é um WebP válido");
+    }
+    let largura = 0, altura = 0;
+    const quadros = [];
+    let pos = 12;
+    while (pos + 8 <= buffer.length) {
+        const tipo = buffer.toString("ascii", pos, pos + 4);
+        const tam = buffer.readUInt32LE(pos + 4);
+        const ini = pos + 8;
+        const fim = Math.min(ini + tam, buffer.length);
+        if (tipo === "VP8X") {
+            largura = 1 + buffer.readUIntLE(ini + 4, 3);
+            altura = 1 + buffer.readUIntLE(ini + 7, 3);
+        } else if (tipo === "ANMF") {
+            const f = buffer[ini + 15];
+            quadros.push({
+                x: buffer.readUIntLE(ini, 3) * 2,
+                y: buffer.readUIntLE(ini + 3, 3) * 2,
+                w: 1 + buffer.readUIntLE(ini + 6, 3),
+                h: 1 + buffer.readUIntLE(ini + 9, 3),
+                duracao: Math.max(20, buffer.readUIntLE(ini + 12, 3)),
+                semMistura: !!(f & 2),
+                descartarFundo: !!(f & 1),
+                dados: buffer.subarray(ini + 16, fim)
+            });
+        }
+        pos = ini + tam + (tam % 2);
+    }
+    return { largura, altura, quadros };
+}
+
+// Monta um arquivo WebP "parado" a partir dos sub-chunks de um quadro
+function webpDoQuadro(q) {
+    const temAlpha = q.dados.includes(Buffer.from("ALPH"));
+    const partes = [];
+    if (temAlpha) {
+        const vp8x = Buffer.alloc(18);
+        vp8x.write("VP8X", 0, "ascii");
+        vp8x.writeUInt32LE(10, 4);
+        vp8x[8] = 0x10; // flag de alpha
+        vp8x.writeUIntLE(q.w - 1, 12, 3);
+        vp8x.writeUIntLE(q.h - 1, 15, 3);
+        partes.push(vp8x);
+    }
+    partes.push(q.dados);
+    const corpo = Buffer.concat(partes);
+    const cab = Buffer.alloc(12);
+    cab.write("RIFF", 0, "ascii");
+    cab.writeUInt32LE(4 + corpo.length, 4);
+    cab.write("WEBP", 8, "ascii");
+    return Buffer.concat([cab, corpo]);
+}
+
+// Devolve { largura, altura, quadros:[{ inicioMs, png:()=>Buffer }] } com cada
+// quadro JÁ composto sobre o fundo (cor sólida, pois MP4 não tem transparência).
+async function decodificarWebpAnimado(buffer, { fundo = "#000000", maxMs = 6000 } = {}) {
+    const { createCanvas, loadImage } = require("@napi-rs/canvas");
+    const info = lerContainerWebp(buffer);
+
+    // WebP parado (sem ANMF): um único quadro
+    if (!info.quadros.length) {
+        const img = await loadImage(buffer);
+        const c = createCanvas(img.width, img.height);
+        const g = c.getContext("2d");
+        g.fillStyle = fundo; g.fillRect(0, 0, c.width, c.height);
+        g.drawImage(img, 0, 0);
+        return { largura: c.width, altura: c.height, quadros: [{ inicioMs: 0, duracao: 1000, png: async () => c.encode("png"), jpeg: async () => c.encode("jpeg", 92) }] };
+    }
+
+    let L = info.largura, A = info.altura;
+    if (!L || !A) { // sem VP8X: usa o maior quadro
+        L = Math.max(...info.quadros.map(q => q.x + q.w));
+        A = Math.max(...info.quadros.map(q => q.y + q.h));
+    }
+    const tela = createCanvas(L, A);
+    const g = tela.getContext("2d");
+    // camada "estado" mantém o conteúdo transparente acumulado (a regra de
+    // dispose/blend do WebP vale sobre a camada, não sobre o fundo sólido)
+    const camada = createCanvas(L, A);
+    const gc = camada.getContext("2d");
+
+    const saida = [];
+    let t = 0, anterior = null;
+    for (const q of info.quadros) {
+        if (t >= maxMs) break;
+        if (anterior && anterior.descartarFundo) gc.clearRect(anterior.x, anterior.y, anterior.w, anterior.h);
+        const img = await loadImage(webpDoQuadro(q));
+        if (q.semMistura) gc.clearRect(q.x, q.y, q.w, q.h);
+        gc.drawImage(img, q.x, q.y, q.w, q.h);
+
+        // compõe sobre o fundo e congela esse quadro
+        g.globalCompositeOperation = "source-over";
+        g.fillStyle = fundo; g.fillRect(0, 0, L, A);
+        g.drawImage(camada, 0, 0);
+        const png = await tela.encode("png");
+        const jpg = await tela.encode("jpeg", 92);
+        saida.push({ inicioMs: t, duracao: q.duracao, png: async () => png, jpeg: async () => jpg });
+        t += q.duracao;
+        anterior = q;
+    }
+    return { largura: L, altura: A, quadros: saida };
+}
+
+module.exports = { decodificarWebpAnimado };
+
+// 🎴 WebP animado → MP4 usando o decodificador em Node (método principal)
+async function converterWebpAnimadoPuroNode(tempEntrada, tempSaida, pastaQuadros) {
+    fs.mkdirSync(pastaQuadros, { recursive: true });
+    const FPS = 12, MAX_MS = 6000;
+    const dec = await decodificarWebpAnimado(fs.readFileSync(tempEntrada), { fundo: "#000000", maxMs: MAX_MS });
+    if (!dec.quadros.length) throw new Error("decodificador não achou nenhum quadro no WebP");
+
+    const totalMs = Math.min(MAX_MS, dec.quadros.reduce((m, q) => Math.max(m, q.inicioMs + q.duracao), 0));
+    const totalSaida = Math.max(1, Math.round((totalMs / 1000) * FPS));
+    let idx = 0;
+    for (let k = 0; k < totalSaida; k++) {
+        const t = (k * 1000) / FPS;
+        while (idx + 1 < dec.quadros.length && dec.quadros[idx + 1].inicioMs <= t) idx++;
+        const png = await dec.quadros[idx].png();
+        fs.writeFileSync(path.join(pastaQuadros, `frame_${String(k + 1).padStart(4, "0")}.png`), png);
+    }
+    await executarFfmpegArquivo([
+        "-y", "-threads", "0", "-loglevel", "error", "-framerate", String(FPS),
+        "-i", path.join(pastaQuadros, "frame_%04d.png"),
+        "-c:v", "libx264", "-pix_fmt", "yuv420p",
+        "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2",
+        "-crf", "24", "-preset", "ultrafast", "-movflags", "+faststart", "-an", tempSaida
+    ]);
+}
+
+// 🖼️ Primeiro quadro do WebP animado → JPG (decodificador em Node)
+async function extrairPrimeiroFramePuroNode(tempEntrada, tempSaidaJpg) {
+    const dec = await decodificarWebpAnimado(fs.readFileSync(tempEntrada), { fundo: "#ffffff", maxMs: 1 });
+    fs.writeFileSync(tempSaidaJpg, await dec.quadros[0].jpeg());
 }
 
 function executarFfmpegPipe(buffer, argumentos) {
@@ -177,7 +322,7 @@ async function converterParaGif(sock, msg, modoSaida = "gif") {
         await sock.sendMessage(from, { text: `⏳ Convertendo pra ${modoSaida === "imagem" ? "imagem" : "gif"}, @${remetente.split('@')[0]}...`, mentions: [remetente] }, { quoted: msg });
 
         // ⬇️ BAIXA O ARQUIVO
-        const stream = await downloadContentFromMessage(midia, tipo.includes("sticker") ? "sticker" : tipo);
+        const stream = await downloadContentFromMessage(midia, tipo.includes("sticker") ? "sticker" : (tipo === "imagem" ? "image" : tipo));
         let buffer = Buffer.from([]);
         for await (const pedaco of stream) buffer = Buffer.concat([buffer, pedaco]);
 
@@ -219,7 +364,12 @@ async function converterParaGif(sock, msg, modoSaida = "gif") {
         if (tipo === "sticker_animado" && modoSaida === "imagem") {
             // 🖼️ FIGURINHA ANIMADA → IMAGEM: pega só o primeiro frame
             try {
-                await extrairPrimeiroFrameWebp(tempEntrada, tempSaida, pastaQuadros);
+                try {
+                    await extrairPrimeiroFramePuroNode(tempEntrada, tempSaida);
+                } catch (erroNode) {
+                    console.warn("⚠️ decodificador Node falhou (1 frame); tentando webpmux/dwebp:", erroNode.message);
+                    await extrairPrimeiroFrameWebp(tempEntrada, tempSaida, pastaQuadros);
+                }
             } catch (erroFrame) {
                 console.warn("⚠️ extração de 1 frame via webpmux/dwebp falhou; tentando ffmpeg direto:", erroFrame.message);
                 await executarFfmpegArquivo(["-y", "-loglevel", "error", "-i", tempEntrada, "-frames:v", "1", tempSaida]);
@@ -243,7 +393,14 @@ async function converterParaGif(sock, msg, modoSaida = "gif") {
             ];
             let erroFrames;
             try {
-                await converterWebpAnimadoViaFrames(tempEntrada, tempSaida, pastaQuadros);
+                try {
+                    // 1º: decodificador em Node (funciona em qualquer hospedagem)
+                    await converterWebpAnimadoPuroNode(tempEntrada, tempSaida, pastaQuadros);
+                } catch (falhaNode) {
+                    console.warn("⚠️ decodificador Node falhou; tentando webpmux/dwebp:", falhaNode.message);
+                    limparArquivos(null, tempSaida, pastaQuadros);
+                    await converterWebpAnimadoViaFrames(tempEntrada, tempSaida, pastaQuadros);
+                }
             } catch (falhaFrames) {
                 erroFrames = falhaFrames;
                 console.warn("⚠️ extração via webpmux/dwebp falhou; tentando ffmpeg direto:", falhaFrames.message);

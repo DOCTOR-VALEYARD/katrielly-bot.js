@@ -9,6 +9,7 @@ const fs = require('fs');
 const path = require('path');
 const { downloadContentFromMessage } = require('@whiskeysockets/baileys');
 const config = require('../../config');
+const { semSincroniaTexto } = require('../ffmpeg-compat/ffmpeg-compat');
 
 /**
  * Função principal — COMANDO ou AUTOMÁTICO
@@ -46,6 +47,7 @@ async function criarFigurinha(sock, msg, modoAutomatico = false) {
 
     if (!tipo) {
         if (!modoAutomatico) {
+            try { console.log("🔎 FIGURINHA SEM MÍDIA — mensagem que chegou:", JSON.stringify(msg.message, (k, v) => (v && v.type === "Buffer") || k === "jpegThumbnail" ? "[bin]" : v).slice(0, 1500)); } catch {}
             return sock.sendMessage(from, { 
                 text: `┅┄┅┄『 ✦ 』┄┅┄┅┄
  🖼️ *ERRO AO CRIAR!*
@@ -98,7 +100,7 @@ ${config.PREFIX}s / ${config.PREFIX}sticker
                 -loop 1 
                 -lossless 0 
                 -quality 80 
-                -an -vsync 0 
+                -an ${semSincroniaTexto()} 
                 -f webp "${tempOutput}"`;
         } else {
             // 🖼️ IMAGEM ESTÁTICA
@@ -112,7 +114,7 @@ ${config.PREFIX}s / ${config.PREFIX}sticker
                 -compression_level 3 
                 -lossless 0 
                 -loop 0 
-                -an -vsync 0 
+                -an ${semSincroniaTexto()} 
                 -q:v 90 "${tempOutput}"`;
         }
 
@@ -138,18 +140,22 @@ Tente novamente!
             }
 
             // ✅ 📦 AQUI É ONDE COLOCAMOS TODAS AS INFORMAÇÕES QUE VOCÊ QUER
-            const bufferFinal = fs.readFileSync(tempOutput);
-            
-            await sock.sendMessage(from, {
-                sticker: bufferFinal,
+            const bufferSemEtiqueta = fs.readFileSync(tempOutput);
 
-                // 📋 DADOS QUE APARECEM AO CLICAR NA FIGURINHA
-                packname: `🎴 ${config.BOT_NAME} • ${config.OWNER_NAME}`, 
+            // 📋 DADOS QUE APARECEM AO CLICAR NA FIGURINHA (nome do pacote + autor).
+            // Eles precisam ser gravados DENTRO do arquivo .webp: mandar "packname" e
+            // "author" no sendMessage não funciona (o Baileys ignora esses campos).
+            const { adicionarMetadados } = require('../figurinha-meta/figurinha-meta');
+            const bufferFinal = adicionarMetadados(bufferSemEtiqueta, {
+                packname: `🎴 ${config.BOT_NAME} • ${config.OWNER_NAME}`,
                 author: `👑 CRIADOR: ${config.OWNER_NAME}
 👤 FEITO POR: ${nomeUsuario}
 📍 LOCAL: ${localEnvio}
-⏰ DATA/HORA: ${dataHora}`,
+⏰ DATA/HORA: ${dataHora}`
+            });
 
+            await sock.sendMessage(from, {
+                sticker: bufferFinal,
                 mimetype: "image/webp"
             }, { quoted: msg });
 
